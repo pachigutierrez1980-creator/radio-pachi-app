@@ -85,7 +85,7 @@ export default function DJProfile() {
         PACHI GUTIERREZ
       </h2>
       <p className="text-violet-400 text-sm font-medium uppercase tracking-widest mb-4">
-        DJ / Productor
+        DJ / Motion Producer
       </p>
 
       {/* Bio */}

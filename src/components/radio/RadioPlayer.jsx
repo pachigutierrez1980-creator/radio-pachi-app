@@ -3,7 +3,10 @@ import { Play, Pause, Volume2, VolumeX, Wifi, WifiOff, Radio } from "lucide-reac
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { base44 } from "@/api/base44Client";
 import AudioVisualizer from "./AudioVisualizer";
+
+const songInfoCache = new Map();
 
 const DEFAULT_STREAM_URL = "https://a6.asurahosting.com:7410/radio.mp3";
 const NOWPLAYING_API = "https://a6.asurahosting.com/api/nowplaying/pachi_gutierrez_dj";
@@ -17,26 +20,73 @@ export default function RadioPlayer() {
   const [streamUrl, setStreamUrl] = useState(DEFAULT_STREAM_URL);
   const [showSettings, setShowSettings] = useState(false);
   const [tempUrl, setTempUrl] = useState(DEFAULT_STREAM_URL);
+  const [songInfo, setSongInfo] = useState(null); // { year, description }
+  const [loadingSongInfo, setLoadingSongInfo] = useState(false);
   const audioRef = useRef(null);
   const metadataInterval = useRef(null);
   const reconnectTimeout = useRef(null);
+  const lastSongKey = useRef(null);
+
+  const fetchSongInfo = useCallback(async (artist, title) => {
+    const key = `${artist}|||${title}`.toLowerCase();
+    if (lastSongKey.current === key) return;
+    lastSongKey.current = key;
+
+    if (songInfoCache.has(key)) {
+      setSongInfo(songInfoCache.get(key));
+      return;
+    }
+
+    setSongInfo(null);
+    setLoadingSongInfo(true);
+
+    try {
+      // 1. MusicBrainz for release year
+      const mbQuery = encodeURIComponent(`recording:"${title}" AND artist:"${artist}"`);
+      const mbRes = await fetch(
+        `https://musicbrainz.org/ws/2/recording/?query=${mbQuery}&limit=1&fmt=json`,
+        { headers: { "User-Agent": "PachiGutierrezRadio/1.0 (radio@pachigutierrez.live)" } }
+      );
+      let year = null;
+      if (mbRes.ok) {
+        const mbData = await mbRes.json();
+        const firstDate = mbData?.recordings?.[0]?.["first-release-date"] || mbData?.recordings?.[0]?.releases?.[0]?.date;
+        if (firstDate) year = firstDate.substring(0, 4);
+      }
+
+      // 2. LLM for interesting fact
+      const llmRes = await base44.integrations.Core.InvokeLLM({
+        prompt: `Give me ONE brief, interesting sentence (max 12 words) about the song "${title}" by ${artist}. Just the fact, no quotes, no artist/title repetition. If you don't know it, return an empty string.`,
+        response_json_schema: { type: "object", properties: { description: { type: "string" } } }
+      });
+      const description = llmRes?.description || "";
+
+      const info = { year, description: description.trim() };
+      songInfoCache.set(key, info);
+      setSongInfo(info);
+    } catch {
+      setSongInfo(null);
+    }
+    setLoadingSongInfo(false);
+  }, []);
 
   const fetchNowPlaying = useCallback(async () => {
     try {
       const res = await fetch(NOWPLAYING_API);
       if (res.ok) {
         const station = await res.json();
-        setCurrentTrack({
-          artist: station.now_playing?.song?.artist || "Artista desconocido",
-          title: station.now_playing?.song?.title || "Pista desconocida",
-          art: station.now_playing?.song?.art || null,
-        });
+        const artist = station.now_playing?.song?.artist || "Artista desconocido";
+        const title = station.now_playing?.song?.title || "Pista desconocida";
+        setCurrentTrack({ artist, title, art: station.now_playing?.song?.art || null });
         setNextTrack(station.playing_next?.song || null);
+        if (artist && title && artist !== "Artista desconocido") {
+          fetchSongInfo(artist, title);
+        }
       }
     } catch {
       // Silently fail
     }
-  }, []);
+  }, [fetchSongInfo]);
 
   useEffect(() => {
     // Always fetch metadata, even when not playing
@@ -53,7 +103,7 @@ export default function RadioPlayer() {
     }
   }, [volume, isMuted]);
 
-  const togglePlay = async () => {
+  const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio) return;
     if (isPlaying) {
@@ -61,10 +111,15 @@ export default function RadioPlayer() {
       audio.src = "";
       setIsPlaying(false);
     } else {
-      audio.src = streamUrl;
+      // iOS Safari requires load() before play() after setting src
+      audio.src = streamUrl + "?t=" + Date.now(); // cache-bust para iOS
       audio.load();
-      await audio.play();
-      setIsPlaying(true);
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch(() => setIsPlaying(false));
+      }
     }
   };
 
@@ -98,7 +153,7 @@ export default function RadioPlayer() {
 
   return (
     <div className="glass-card rounded-2xl p-6 md:p-8 neon-border relative overflow-hidden">
-      <audio ref={audioRef} crossOrigin="anonymous" preload="none" onError={handleStreamError} />
+      <audio ref={audioRef} preload="none" playsInline onError={handleStreamError} />
 
       {/* Badge + Settings */}
       <div className="flex items-center justify-between mb-6">
@@ -154,6 +209,17 @@ export default function RadioPlayer() {
         </h3>
         <p className="text-blue-400 text-sm mt-1">{currentTrack.artist}</p>
 
+        {/* Song info */}
+        {loadingSongInfo ? (
+          <p className="text-zinc-600 text-xs mt-2 animate-pulse">Buscando información...</p>
+        ) : songInfo && (songInfo.year || songInfo.description) ? (
+          <div className="mt-2 flex flex-col items-center gap-0.5">
+            <p className="text-zinc-400 text-xs">
+              {[songInfo.year, songInfo.description].filter(Boolean).join(" • ")}
+            </p>
+          </div>
+        ) : null}
+
         {/* En cola */}
         {nextTrack && (
           <div className="mt-3 px-4 py-2 rounded-xl bg-zinc-900/60 border border-zinc-800/50 flex items-center gap-2">
@@ -167,7 +233,7 @@ export default function RadioPlayer() {
 
       {/* Visualizador */}
       <div className="mb-6">
-        <AudioVisualizer isPlaying={isPlaying} audioRef={audioRef} />
+        <AudioVisualizer isPlaying={isPlaying} />
       </div>
 
       {/* Controles */}
