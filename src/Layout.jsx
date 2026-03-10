@@ -13,9 +13,11 @@ export default function Layout({ children, currentPageName }) {
   const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
+    // Show admin button if Base44 admin OR if PIN session is active
     base44.auth.me()
       .then((u) => { if (u?.role === "admin") setIsAdmin(true); })
       .catch(() => {});
+    if (sessionStorage.getItem("pachi_admin_pin_ok") === "1") setIsAdmin(true);
   }, []);
 
   const handleNav = (e, href) => {

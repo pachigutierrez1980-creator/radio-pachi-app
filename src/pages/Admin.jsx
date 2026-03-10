@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { base44 } from "@/api/base44Client";
-import { Pencil, Save, X, Upload, Radio, ArrowLeft, Loader2, RefreshCw, CheckCircle, Sparkles } from "lucide-react";
+import { Pencil, Save, X, Upload, Radio, ArrowLeft, Loader2, RefreshCw, CheckCircle, Sparkles, Download, FolderOpen, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createPageUrl } from "@/utils";
+
+const SESSION_KEY = "pachi_admin_pin_ok";
 
 const STATION = "pachi_gutierrez_dj";
 const SCHEDULE_API = `https://a6.asurahosting.com/api/station/${STATION}/schedule`;
@@ -20,6 +22,10 @@ const EMPTY_EDIT = { description: "", image_url: "", dj_name: "", genre: "" };
 export default function Admin() {
   const [user, setUser] = useState(null);
   const [checking, setChecking] = useState(true);
+  const [pinAuthed, setPinAuthed] = useState(() => sessionStorage.getItem(SESSION_KEY) === "1");
+  const [pin, setPin] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [pinLoading, setPinLoading] = useState(false);
 
   // Data
   const [azuraShows, setAzuraShows] = useState([]); // unique shows from AzuraCast
@@ -39,11 +45,30 @@ export default function Admin() {
       .then((u) => {
         setUser(u);
         setChecking(false);
-        if (u?.role === "admin") loadAll();
+        if (u?.role === "admin" || pinAuthed) loadAll();
         else setLoading(false);
       })
       .catch(() => { setChecking(false); setLoading(false); });
-  }, []);
+  }, []);  // eslint-disable-line
+
+  const handlePinSubmit = async (e) => {
+    e.preventDefault();
+    setPinLoading(true);
+    setPinError("");
+    try {
+      const res = await base44.functions.invoke("verifyAdminPin", { pin });
+      if (res.data?.success) {
+        sessionStorage.setItem(SESSION_KEY, "1");
+        setPinAuthed(true);
+        loadAll();
+      } else {
+        setPinError("PIN incorrecto. Inténtalo de nuevo.");
+      }
+    } catch {
+      setPinError("Error al verificar el PIN.");
+    }
+    setPinLoading(false);
+  };
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -112,6 +137,44 @@ export default function Admin() {
     setEditForm(EMPTY_EDIT);
   };
 
+  const handleExport = async () => {
+    const schedules = await base44.entities.Schedule.list().catch(() => []);
+    const backup = {
+      exported_at: new Date().toISOString(),
+      version: 1,
+      data: { schedules }
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pachi-radio-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const backup = JSON.parse(text);
+    const schedules = backup?.data?.schedules || [];
+    if (schedules.length === 0) { alert("No se encontraron datos en el archivo."); return; }
+    if (!confirm(`Importar ${schedules.length} programas. Esto reemplazará los registros existentes con el mismo nombre.`)) return;
+    // Upsert: update if exists, create if not
+    const existing = await base44.entities.Schedule.list().catch(() => []);
+    const existingByName = Object.fromEntries(existing.map(r => [r.show_name?.toLowerCase().trim(), r]));
+    await Promise.all(schedules.map(s => {
+      const key = s.show_name?.toLowerCase().trim();
+      const { id, created_date, updated_date, created_by, ...fields } = s;
+      if (existingByName[key]) return base44.entities.Schedule.update(existingByName[key].id, fields);
+      return base44.entities.Schedule.create(fields);
+    }));
+    await loadAll();
+    alert("Importación completada.");
+    e.target.value = "";
+  };
+
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -128,12 +191,37 @@ export default function Admin() {
     </div>
   );
 
-  if (!user || user.role !== "admin") return (
-    <div className="min-h-screen bg-black flex items-center justify-center text-center px-4">
-      <div>
-        <Radio className="w-10 h-10 mx-auto mb-4 text-zinc-700" />
-        <p className="text-zinc-500 text-sm">Acceso restringido</p>
-        <a href={createPageUrl("Home")} className="text-violet-400 text-xs mt-3 inline-block hover:text-violet-300">← Volver a la radio</a>
+  const isAdmin = user?.role === "admin" || pinAuthed;
+
+  if (!isAdmin) return (
+    <div className="min-h-screen bg-black flex items-center justify-center px-4">
+      <div className="w-full max-w-sm">
+        <div className="glass-card rounded-2xl p-8 neon-border text-center">
+          <div className="w-14 h-14 rounded-full bg-violet-600/15 border border-violet-600/30 flex items-center justify-center mx-auto mb-5">
+            <Lock className="w-6 h-6 text-violet-400" />
+          </div>
+          <h2 className="text-white font-semibold text-lg mb-1">Panel Admin</h2>
+          <p className="text-zinc-500 text-sm mb-6">Ingresa el PIN de administrador</p>
+          <form onSubmit={handlePinSubmit} className="space-y-4">
+            <Input
+              type="password"
+              value={pin}
+              onChange={e => { setPin(e.target.value); setPinError(""); }}
+              placeholder="••••••••"
+              className="bg-zinc-900 border-zinc-700 text-white text-center text-lg tracking-widest placeholder:text-zinc-600 focus:border-violet-600"
+              autoFocus
+            />
+            {pinError && <p className="text-red-400 text-xs">{pinError}</p>}
+            <Button
+              type="submit"
+              disabled={pinLoading || !pin}
+              className="w-full bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white border-0"
+            >
+              {pinLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Entrar"}
+            </Button>
+          </form>
+          <a href={createPageUrl("Home")} className="text-zinc-600 text-xs mt-5 inline-block hover:text-zinc-400 transition-colors">← Volver a la radio</a>
+        </div>
       </div>
     </div>
   );
@@ -154,15 +242,35 @@ export default function Admin() {
           <Radio className="w-5 h-5 text-violet-500" />
           <h1 className="text-white font-semibold text-sm uppercase tracking-wider">Gestión de Programación</h1>
         </div>
-        <button
-          onClick={loadAll}
-          disabled={syncing}
-          title="Sincronizar con AzuraCast"
-          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 text-zinc-400 hover:text-violet-400 hover:border-violet-600 text-xs transition-all disabled:opacity-50"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
-          Sincronizar
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={handleExport}
+            title="Exportar backup completo"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 text-zinc-400 hover:text-green-400 hover:border-green-600 text-xs transition-all"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Exportar</span>
+          </button>
+
+          <label
+            title="Importar desde backup"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 text-zinc-400 hover:text-blue-400 hover:border-blue-600 text-xs transition-all cursor-pointer"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Importar</span>
+            <input type="file" accept=".json" className="hidden" onChange={handleImport} />
+          </label>
+
+          <button
+            onClick={loadAll}
+            disabled={syncing}
+            title="Sincronizar con AzuraCast"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 text-zinc-400 hover:text-violet-400 hover:border-violet-600 text-xs transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
+            <span className="hidden sm:inline">Sincronizar</span>
+          </button>
+        </div>
       </div>
 
       <div className="max-w-4xl mx-auto px-4 py-6 space-y-4">

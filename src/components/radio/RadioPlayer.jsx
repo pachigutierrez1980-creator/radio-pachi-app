@@ -70,6 +70,18 @@ export default function RadioPlayer() {
     setLoadingSongInfo(false);
   }, []);
 
+  const updateMediaSession = useCallback((track) => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title || "En vivo",
+      artist: track.artist || "Pachi Gutierrez Radio",
+      album: "Pachi Gutierrez Radio",
+      artwork: track.art
+        ? [{ src: track.art, sizes: "512x512", type: "image/jpeg" }]
+        : [{ src: "/favicon.ico", sizes: "48x48", type: "image/x-icon" }],
+    });
+  }, []);
+
   const fetchNowPlaying = useCallback(async () => {
     try {
       const res = await fetch(NOWPLAYING_API);
@@ -77,8 +89,10 @@ export default function RadioPlayer() {
         const station = await res.json();
         const artist = station.now_playing?.song?.artist || "Artista desconocido";
         const title = station.now_playing?.song?.title || "Pista desconocida";
-        setCurrentTrack({ artist, title, art: station.now_playing?.song?.art || null });
+        const art = station.now_playing?.song?.art || null;
+        setCurrentTrack({ artist, title, art });
         setNextTrack(station.playing_next?.song || null);
+        updateMediaSession({ artist, title, art });
         if (artist && title && artist !== "Artista desconocido") {
           fetchSongInfo(artist, title);
         }
@@ -86,7 +100,7 @@ export default function RadioPlayer() {
     } catch {
       // Silently fail
     }
-  }, [fetchSongInfo]);
+  }, [fetchSongInfo, updateMediaSession]);
 
   useEffect(() => {
     // Always fetch metadata, even when not playing
@@ -96,6 +110,26 @@ export default function RadioPlayer() {
       if (metadataInterval.current) clearInterval(metadataInterval.current);
     };
   }, [fetchNowPlaying]);
+
+  // Register Media Session handlers for lock screen controls
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.setActionHandler("play", () => {
+      if (!isPlaying) togglePlay();
+    });
+    navigator.mediaSession.setActionHandler("pause", () => {
+      if (isPlaying) togglePlay();
+    });
+    navigator.mediaSession.setActionHandler("stop", () => {
+      if (isPlaying) togglePlay();
+    });
+  }, [isPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Update Media Session playback state
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+  }, [isPlaying]);
 
   useEffect(() => {
     if (audioRef.current) {
@@ -153,7 +187,15 @@ export default function RadioPlayer() {
 
   return (
     <div className="glass-card rounded-2xl p-6 md:p-8 neon-border relative overflow-hidden">
-      <audio ref={audioRef} preload="none" playsInline onError={handleStreamError} />
+      {/* playsInline + x-webkit-airplay + disableRemotePlayback help background audio on iOS/Android */}
+      <audio
+        ref={audioRef}
+        preload="none"
+        playsInline
+        x-webkit-airplay="allow"
+        onError={handleStreamError}
+        style={{ display: "none" }}
+      />
 
       {/* Badge + Settings */}
       <div className="flex items-center justify-between mb-6">
