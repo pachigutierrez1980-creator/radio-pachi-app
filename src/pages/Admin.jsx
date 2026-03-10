@@ -104,6 +104,7 @@ export default function Admin() {
       setNewCount(toCreate.length);
     }
 
+    if (toCreate.length === 0) setNewCount(0);
     setDbRecords(updatedDb);
     setLoading(false);
     setSyncing(false);

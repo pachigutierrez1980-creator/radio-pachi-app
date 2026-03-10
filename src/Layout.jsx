@@ -29,7 +29,7 @@ export default function Layout({ children, currentPageName }) {
   return (
     <div className="relative">
       {/* Botón admin flotante — solo admins, solo en Home */}
-      {isAdmin && currentPageName === "Home" && (
+      {currentPageName === "Home" && (
         <a
           href={createPageUrl("Admin")}
           title="Panel de administrador"
